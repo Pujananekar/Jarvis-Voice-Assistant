@@ -12,6 +12,14 @@ pipeline {
 
     stages {
 
+        stage('Show Public IP') {
+            steps {
+                echo "========================================"
+                echo "   🚀 Deploying to Server: ${REMOTE_HOST}"
+                echo "========================================"
+            }
+        }
+
         stage('Checkout') {
             steps {
                 git branch: 'main',
@@ -26,7 +34,7 @@ pipeline {
                         ssh ${SSH_OPTS} ${REMOTE_USER}@${REMOTE_HOST} "mkdir -p ${REMOTE_DIR}"
 
                         rsync -avz -e "ssh ${SSH_OPTS}" \
-                        --delete --exclude='.git' ./ \
+                        --exclude='.git' ./ \
                         ${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_DIR}/
                     """
                 }
@@ -41,11 +49,9 @@ ssh ${SSH_OPTS} ${REMOTE_USER}@${REMOTE_HOST} << 'EOF'
 set -e
 cd ${REMOTE_DIR}
 
-echo "[*] Installing Python dependencies..."
 sudo apt update -y
 sudo apt install -y python3 python3-venv python3-pip espeak-ng espeak-ng-data
 
-# Create venv
 if [ ! -d "venv" ]; then
   python3 -m venv venv
 fi
@@ -62,7 +68,7 @@ EOF
             }
         }
 
-        stage('Create or Update systemd Service') {
+        stage('Create/update systemd Unit') {
             steps {
                 sshagent(credentials: ["${CRED_ID}"]) {
                     sh """
@@ -83,8 +89,6 @@ Environment=PATH=${REMOTE_DIR}/venv/bin:/usr/bin:/bin
 ExecStart=${REMOTE_DIR}/venv/bin/python ${REMOTE_DIR}/Jarvis/jarvis.py
 Restart=on-failure
 RestartSec=5
-StandardOutput=append:${REMOTE_DIR}/jarvis.stdout.log
-StandardError=append:${REMOTE_DIR}/jarvis.stderr.log
 
 [Install]
 WantedBy=multi-user.target
@@ -98,19 +102,21 @@ EOF
             }
         }
 
-        stage('Restart & Verify Service') {
+        stage('Restart & Verify') {
             steps {
                 sshagent(credentials: ["${CRED_ID}"]) {
                     sh """
 ssh ${SSH_OPTS} ${REMOTE_USER}@${REMOTE_HOST} << 'EOF'
+
 sudo systemctl restart ${SERVICE_NAME}
 sleep 2
 
-echo "[*] Service Status:"
-sudo systemctl status ${SERVICE_NAME} --no-pager -n 20 || true
+echo "-------- SERVICE STATUS --------"
+sudo systemctl status ${SERVICE_NAME} --no-pager -n 20
 
-echo "[*] Latest Logs:"
-sudo journalctl -u ${SERVICE_NAME} -n 20 --no-pager || true
+echo "-------- LAST 20 LOGS --------"
+sudo journalctl -u ${SERVICE_NAME} -n 20 --no-pager
+
 EOF
 """
                 }
