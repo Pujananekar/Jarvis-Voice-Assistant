@@ -2,62 +2,124 @@ pipeline {
     agent any
 
     environment {
-        SERVER_IP = "3.110.207.105"
-        SSH_USER = "ubuntu"
+        REMOTE_USER = "ubuntu"
+        REMOTE_HOST = "3.110.207.105"
+        REMOTE_DIR  = "/home/ubuntu/jarvis"
+        SSH_OPTS    = "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+        CRED_ID     = "jarvis-ssh-key"
+        SERVICE_NAME = "jarvis.service"
     }
 
     stages {
 
-        stage("Show Public IP") {
+        stage('Show Public IP') {
             steps {
                 echo "========================================"
-                echo "🚀 Deploying to Server: ${SERVER_IP}"
+                echo "   🚀 Deploying to Server: ${REMOTE_HOST}"
                 echo "========================================"
             }
         }
 
-        stage("Checkout") {
+        stage('Checkout') {
             steps {
                 git branch: 'main',
                     url: 'https://github.com/Pujananekar/Jarvis-Voice-Assistant.git'
             }
         }
 
-        stage("Upload Files") {
+        stage('Package & Transfer') {
             steps {
-                sshagent(['ubuntu']) {
+                sshagent(credentials: ["${CRED_ID}"]) {
                     sh """
-                        ssh -o StrictHostKeyChecking=no ${SSH_USER}@${SERVER_IP} 'mkdir -p /home/ubuntu/jarvis'
+                        ssh ${SSH_OPTS} ${REMOTE_USER}@${REMOTE_HOST} "mkdir -p ${REMOTE_DIR}"
 
-                        rsync -avz -e ssh \
-                            --exclude=.git \
-                            --exclude=venv \
-                            ./ ${SSH_USER}@${SERVER_IP}:/home/ubuntu/jarvis/
+                        rsync -avz -e "ssh ${SSH_OPTS}" \
+                        --exclude='.git' ./ \
+                        ${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_DIR}/
                     """
                 }
             }
         }
 
-        stage("Setup venv & pip install") {
+        stage('Setup venv & Install Dependencies') {
             steps {
-                sshagent(['ubuntu']) {
+                sshagent(credentials: ["${CRED_ID}"]) {
                     sh """
-                        ssh -o StrictHostKeyChecking=no ${SSH_USER}@${SERVER_IP} '
-                            cd /home/ubuntu/jarvis &&
-                            python3 -m venv venv &&
-                            source venv/bin/activate &&
-                            pip install --upgrade pip &&
-                            pip install -r requirements.txt || true
-                        '
-                    """
+ssh ${SSH_OPTS} ${REMOTE_USER}@${REMOTE_HOST} << 'EOF'
+set -e
+cd ${REMOTE_DIR}
+
+sudo apt update -y
+sudo apt install -y python3 python3-venv python3-pip espeak-ng espeak-ng-data
+
+if [ ! -d "venv" ]; then
+  python3 -m venv venv
+fi
+
+. venv/bin/activate
+pip install --upgrade pip setuptools wheel
+
+if [ -f requirements.txt ]; then
+  pip install -r requirements.txt
+fi
+EOF
+"""
                 }
             }
         }
 
-        stage("Skip Service (GUI Required)") {
+        stage('Create/update systemd Unit') {
             steps {
-                echo "❌ Skipping service creation — pyautogui cannot run on server."
-                echo "✔ Your deployment completed successfully."
+                sshagent(credentials: ["${CRED_ID}"]) {
+                    sh """
+ssh ${SSH_OPTS} ${REMOTE_USER}@${REMOTE_HOST} << 'EOF'
+set -e
+
+UNITFILE=/etc/systemd/system/${SERVICE_NAME}
+
+sudo tee \$UNITFILE > /dev/null << 'UNIT'
+[Unit]
+Description=Jarvis Voice Assistant
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=${REMOTE_DIR}
+Environment=PATH=${REMOTE_DIR}/venv/bin:/usr/bin:/bin
+ExecStart=${REMOTE_DIR}/venv/bin/python ${REMOTE_DIR}/Jarvis/jarvis.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+sudo systemctl daemon-reload
+sudo systemctl enable ${SERVICE_NAME}
+EOF
+"""
+                }
+            }
+        }
+
+        stage('Restart & Verify') {
+            steps {
+                sshagent(credentials: ["${CRED_ID}"]) {
+                    sh """
+ssh ${SSH_OPTS} ${REMOTE_USER}@${REMOTE_HOST} << 'EOF'
+
+sudo systemctl restart ${SERVICE_NAME}
+sleep 2
+
+echo "-------- SERVICE STATUS --------"
+sudo systemctl status ${SERVICE_NAME} --no-pager -n 20
+
+echo "-------- LAST 20 LOGS --------"
+sudo journalctl -u ${SERVICE_NAME} -n 20 --no-pager
+
+EOF
+"""
+                }
             }
         }
     }
